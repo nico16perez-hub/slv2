@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "@/lib/auth-context"
-import { useData } from "@/lib/data-context"
 import { isAdmin } from "@/lib/auth"
 import * as api from "@/lib/api"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -25,15 +24,23 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { BarChart3, RefreshCw, AlertTriangle, Wrench, Eye, FileDown } from "lucide-react"
 import {
-  format,
-  startOfWeek,
-  endOfWeek,
-  startOfMonth,
+  BarChart3,
+  RefreshCw,
+  AlertTriangle,
+  Wrench,
+  Eye,
+  FileDown,
+  Search,
+} from "lucide-react"
+import {
+  eachDayOfInterval,
   endOfMonth,
-  isWithinInterval,
+  endOfWeek,
+  format,
   parseISO,
+  startOfMonth,
+  startOfWeek,
 } from "date-fns"
 import { es } from "date-fns/locale"
 import type { CountEntry, ReportPeriod, StatisticsSummary } from "@/lib/types"
@@ -64,7 +71,10 @@ type ReportTask = {
   title: string
   area?: string
   description: string
+  extra?: string
 }
+
+type TypeFilter = ReportTask["type"] | "todos"
 
 function getDateRange(period: ReportPeriod): { startDate: string; endDate: string } {
   const now = new Date()
@@ -111,7 +121,7 @@ function StatsList({ title, entries }: { title: string; entries: CountEntry[] })
                   key={`${item.label}-${index}`}
                   className="flex items-center justify-between rounded-md border border-border/50 px-3 py-2"
                 >
-                  <span className="text-sm text-card-foreground truncate pr-3">{item.label}</span>
+                  <span className="truncate pr-3 text-sm text-card-foreground">{item.label}</span>
                   <Badge variant="secondary" className="text-sm">
                     {item.count}
                   </Badge>
@@ -127,88 +137,138 @@ function StatsList({ title, entries }: { title: string; entries: CountEntry[] })
 
 export function ReportsView() {
   const { user } = useAuth()
-  const { dailyTasks, claims, completedWorks } = useData()
   const router = useRouter()
   const [period, setPeriod] = useState<ReportPeriod>("today")
+  const initialRange = useMemo(() => getDateRange("today"), [])
+  const [startDate, setStartDate] = useState(initialRange.startDate)
+  const [endDate, setEndDate] = useState(initialRange.endDate)
+  const [tasks, setTasks] = useState<ReportTask[]>([])
   const [statistics, setStatistics] = useState<StatisticsSummary | null>(null)
-  const [loadingStatistics, setLoadingStatistics] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [searchQuery, setSearchQuery] = useState("")
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>("todos")
+  const [areaFilter, setAreaFilter] = useState("todos")
+  const [userFilter, setUserFilter] = useState("todos")
 
-  if (!isAdmin(user)) {
-    router.replace("/dashboard")
-    return null
+  useEffect(() => {
+    if (!isAdmin(user)) {
+      router.replace("/dashboard")
+    }
+  }, [router, user])
+
+  const setPresetPeriod = (value: ReportPeriod) => {
+    const range = getDateRange(value)
+    setPeriod(value)
+    setStartDate(range.startDate)
+    setEndDate(range.endDate)
   }
-
-  const { startDate, endDate } = useMemo(() => getDateRange(period), [period])
 
   useEffect(() => {
     let mounted = true
 
-    const loadStatistics = async () => {
-      setLoadingStatistics(true)
-      const data = await api.getStatisticsSummary(startDate, endDate)
-      if (mounted) {
-        setStatistics(data)
-        setLoadingStatistics(false)
-      }
+    const loadReport = async () => {
+      setLoading(true)
+      const [stats, ...days] = await Promise.all([
+        api.getStatisticsSummary(startDate, endDate),
+        ...eachDayOfInterval({
+          start: parseISO(startDate),
+          end: parseISO(endDate),
+        }).map((date) => api.getDashboardToday(format(date, "yyyy-MM-dd"))),
+      ])
+
+      if (!mounted) return
+
+      const detailTasks: ReportTask[] = days.flatMap((day) => {
+        if (!day) return []
+
+        return [
+          ...(day.recurringTasks ?? []).map((task) => ({
+            id: task.id,
+            type: "recurrente" as const,
+            date: day.date,
+            userName: task.userName,
+            title: task.title,
+            area: undefined,
+            description: task.description,
+          })),
+          ...(day.claims ?? []).map((claim) => ({
+            id: claim.id,
+            type: "reclamo" as const,
+            date: claim.date,
+            userName: claim.userName,
+            title: claim.title,
+            area: claim.area,
+            description: claim.description,
+            extra: claim.claimant,
+          })),
+          ...(day.completedWorks ?? []).map((work) => ({
+            id: work.id,
+            type: "trabajo" as const,
+            date: work.date,
+            userName: work.userName,
+            title: work.title,
+            area: work.area,
+            description: work.description,
+          })),
+        ]
+      })
+
+      setTasks(detailTasks)
+      setStatistics(stats)
+      setLoading(false)
     }
 
-    loadStatistics()
+    if (startDate && endDate && parseISO(startDate) <= parseISO(endDate)) {
+      void loadReport()
+    }
 
     return () => {
       mounted = false
     }
   }, [startDate, endDate])
 
-  const filteredTasks = useMemo(() => {
-    const now = new Date()
-    const allTasks: ReportTask[] = [
-      ...dailyTasks.filter((task) => task.type === "recurrente"),
-      ...claims.map((claim) => ({
-        id: claim.id,
-        type: "reclamo" as const,
-        date: claim.date,
-        userName: claim.userName,
-        title: claim.title,
-        area: claim.area,
-        description: claim.description,
-      })),
-      ...completedWorks.map((work) => ({
-        id: work.id,
-        type: "trabajo" as const,
-        date: work.date,
-        userName: work.userName,
-        title: work.title,
-        area: work.area,
-        description: work.description,
-      })),
-    ]
+  if (!isAdmin(user)) return null
 
-    return allTasks.filter((task) => {
-      const taskDate = parseISO(task.date)
-      switch (period) {
-        case "today":
-          return format(taskDate, "yyyy-MM-dd") === format(now, "yyyy-MM-dd")
-        case "week": {
-          const weekStart = startOfWeek(now, { weekStartsOn: 1 })
-          const weekEnd = endOfWeek(now, { weekStartsOn: 1 })
-          return isWithinInterval(taskDate, { start: weekStart, end: weekEnd })
-        }
-        case "month": {
-          const monthStart = startOfMonth(now)
-          const monthEnd = endOfMonth(now)
-          return isWithinInterval(taskDate, { start: monthStart, end: monthEnd })
-        }
-        default:
-          return true
-      }
+  const areas = useMemo(
+    () => Array.from(new Set(tasks.map((task) => task.area).filter(Boolean))).sort() as string[],
+    [tasks]
+  )
+
+  const users = useMemo(
+    () => Array.from(new Set(tasks.map((task) => task.userName).filter(Boolean))).sort(),
+    [tasks]
+  )
+
+  const filteredTasks = useMemo(() => {
+    const normalizedSearch = searchQuery.trim().toLowerCase()
+
+    return tasks.filter((task) => {
+      if (typeFilter !== "todos" && task.type !== typeFilter) return false
+      if (areaFilter !== "todos" && task.area !== areaFilter) return false
+      if (userFilter !== "todos" && task.userName !== userFilter) return false
+
+      if (!normalizedSearch) return true
+
+      return [
+        task.title,
+        task.description,
+        task.area,
+        task.userName,
+        task.extra,
+        TYPE_CONFIG[task.type].label,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase()
+        .includes(normalizedSearch)
     })
-  }, [dailyTasks, claims, completedWorks, period])
+  }, [areaFilter, searchQuery, tasks, typeFilter, userFilter])
 
   const stats = {
     total: filteredTasks.length,
-    recurrente: filteredTasks.filter((t) => t.type === "recurrente").length,
-    reclamo: filteredTasks.filter((t) => t.type === "reclamo").length,
-    trabajo: filteredTasks.filter((t) => t.type === "trabajo").length,
+    recurrente: filteredTasks.filter((task) => task.type === "recurrente").length,
+    reclamo: filteredTasks.filter((task) => task.type === "reclamo").length,
+    trabajo: filteredTasks.filter((task) => task.type === "trabajo").length,
   }
 
   const handleExportPdf = () => {
@@ -219,48 +279,145 @@ export function ReportsView() {
     <>
       <div id="reports-pdf" className="reports-pdf flex flex-col gap-6">
         <div>
-          <h1 className="text-3xl font-semibold tracking-tight text-foreground">
-            Informes
-          </h1>
+          <h1 className="text-3xl font-semibold tracking-tight text-foreground">Informes</h1>
           <p className="mt-1 text-base text-muted-foreground">
-            Vista general de todas las tareas registradas por el equipo.
+            Vista detallada con filtros por fecha, tipo, area, usuario y busqueda.
           </p>
         </div>
 
-        <div className="no-print flex flex-wrap items-center gap-3">
-          <Tabs value={period} onValueChange={(v) => setPeriod(v as ReportPeriod)}>
-            <TabsList>
-              <TabsTrigger value="today" className="text-base">Hoy</TabsTrigger>
-              <TabsTrigger value="week" className="text-base">Esta semana</TabsTrigger>
-              <TabsTrigger value="month" className="text-base">Este mes</TabsTrigger>
-            </TabsList>
-          </Tabs>
+        <div className="no-print flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <Tabs value={period} onValueChange={(value) => setPresetPeriod(value as ReportPeriod)}>
+              <TabsList>
+                <TabsTrigger value="today" className="text-base">Hoy</TabsTrigger>
+                <TabsTrigger value="week" className="text-base">Esta semana</TabsTrigger>
+                <TabsTrigger value="month" className="text-base">Este mes</TabsTrigger>
+              </TabsList>
+            </Tabs>
 
-          <Button onClick={handleExportPdf} className="ml-auto">
-            <FileDown className="mr-2 h-4 w-4" />
-            Exportar PDF
-          </Button>
+            <Button onClick={handleExportPdf} className="sm:ml-auto">
+              <FileDown className="mr-2 h-4 w-4" />
+              Exportar PDF
+            </Button>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+            <label className="grid gap-1 text-sm text-muted-foreground">
+              Desde
+              <input
+                type="date"
+                value={startDate}
+                onChange={(event) => {
+                  setStartDate(event.target.value)
+                  setPeriod("today")
+                }}
+                className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+              />
+            </label>
+            <label className="grid gap-1 text-sm text-muted-foreground">
+              Hasta
+              <input
+                type="date"
+                value={endDate}
+                onChange={(event) => {
+                  setEndDate(event.target.value)
+                  setPeriod("today")
+                }}
+                className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+              />
+            </label>
+
+            <label className="grid gap-1 text-sm text-muted-foreground">
+              Tipo
+              <select
+                value={typeFilter}
+                onChange={(event) => setTypeFilter(event.target.value as TypeFilter)}
+                className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+              >
+                <option value="todos">Todos</option>
+                <option value="recurrente">Recurrentes</option>
+                <option value="reclamo">Reclamos</option>
+                <option value="trabajo">Trabajos</option>
+              </select>
+            </label>
+
+            <label className="grid gap-1 text-sm text-muted-foreground">
+              Area
+              <select
+                value={areaFilter}
+                onChange={(event) => setAreaFilter(event.target.value)}
+                className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+              >
+                <option value="todos">Todas</option>
+                {areas.map((area) => (
+                  <option key={area} value={area}>{area}</option>
+                ))}
+              </select>
+            </label>
+
+            <label className="grid gap-1 text-sm text-muted-foreground">
+              Usuario
+              <select
+                value={userFilter}
+                onChange={(event) => setUserFilter(event.target.value)}
+                className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+              >
+                <option value="todos">Todos</option>
+                {users.map((name) => (
+                  <option key={name} value={name}>{name}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="relative max-w-2xl">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <input
+              type="search"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Buscar por titulo, descripcion, area, usuario o reclamante"
+              className="h-10 w-full rounded-md border border-input bg-background pl-9 pr-3 text-sm text-foreground shadow-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+            />
+          </div>
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-4">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <Card className="border-border/50 pdf-avoid-break">
             <CardContent className="flex items-center gap-3 p-4">
               <BarChart3 className="h-5 w-5 text-muted-foreground" />
               <div>
                 <p className="text-2xl font-semibold text-card-foreground">{stats.total}</p>
-                <p className="text-sm text-muted-foreground">Total</p>
+                <p className="text-sm text-muted-foreground">Total filtrado</p>
               </div>
             </CardContent>
           </Card>
           {(["recurrente", "reclamo", "trabajo"] as const).map((type) => {
             const config = TYPE_CONFIG[type]
             return (
-              <Card key={type} className="border-border/50 pdf-avoid-break">
-                <CardContent className="flex items-center gap-3 p-4">
-                  <config.icon className={`h-5 w-5 ${type === "recurrente" ? "text-chart-1" :
-                      type === "reclamo" ? "text-destructive" :
-                        "text-chart-2"
-                    }`} />
+              <Card
+                key={type}
+                className={`border-border/50 transition-colors pdf-avoid-break ${
+                  typeFilter === type ? "border-primary bg-primary/5" : "hover:bg-muted/50"
+                }`}
+              >
+                <CardContent
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setTypeFilter((current) => (current === type ? "todos" : type))}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault()
+                      setTypeFilter((current) => (current === type ? "todos" : type))
+                    }
+                  }}
+                  className="flex cursor-pointer items-center gap-3 p-4"
+                >
+                  <config.icon className={`h-5 w-5 ${
+                    type === "recurrente" ? "text-chart-1" :
+                    type === "reclamo" ? "text-destructive" :
+                    "text-chart-2"
+                  }`} />
                   <div>
                     <p className="text-2xl font-semibold text-card-foreground">{stats[type]}</p>
                     <p className="text-sm text-muted-foreground">{config.label}s</p>
@@ -278,7 +435,7 @@ export function ReportsView() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {loadingStatistics ? (
+            {loading ? (
               <p className="text-base text-muted-foreground">Cargando estadisticas...</p>
             ) : !statistics ? (
               <p className="text-base text-muted-foreground">No se pudieron cargar las estadisticas.</p>
@@ -327,11 +484,16 @@ export function ReportsView() {
             <CardTitle className="text-lg text-card-foreground">Detalle de tareas</CardTitle>
           </CardHeader>
           <CardContent>
-            {filteredTasks.length === 0 ? (
+            {loading ? (
+              <div className="flex flex-col items-center justify-center py-12 text-center">
+                <RefreshCw className="h-10 w-10 animate-spin text-muted-foreground/40" />
+                <p className="mt-3 text-base text-muted-foreground">Cargando detalle...</p>
+              </div>
+            ) : filteredTasks.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-center">
                 <BarChart3 className="h-10 w-10 text-muted-foreground/40" />
                 <p className="mt-3 text-base text-muted-foreground">
-                  No hay tareas para el periodo seleccionado
+                  No hay tareas para los filtros seleccionados
                 </p>
               </div>
             ) : (
@@ -344,32 +506,29 @@ export function ReportsView() {
                     <TableHead className="text-base">Titulo</TableHead>
                     <TableHead className="text-base">Area</TableHead>
                     <TableHead className="text-base">Descripcion</TableHead>
-                    <TableHead className="text-base text-right pdf-detail-col no-print">Detalle</TableHead>
+                    <TableHead className="no-print text-right text-base pdf-detail-col">Detalle</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {filteredTasks.map((task) => {
                     const config = TYPE_CONFIG[task.type]
                     return (
-                      <TableRow key={`${task.type}-${task.id}`}>
-                        <TableCell className="text-muted-foreground text-base">
-                          {format(parseISO(task.date), "dd/MM", { locale: es })}
+                      <TableRow key={`${task.type}-${task.id}-${task.date}`}>
+                        <TableCell className="text-base text-muted-foreground">
+                          {format(parseISO(task.date), "dd/MM/yyyy", { locale: es })}
                         </TableCell>
                         <TableCell className="text-base">{task.userName}</TableCell>
                         <TableCell>
-                          <Badge
-                            variant="outline"
-                            className={`text-xs ${config.className}`}
-                          >
+                          <Badge variant="outline" className={`text-xs ${config.className}`}>
                             {config.label}
                           </Badge>
                         </TableCell>
-                        <TableCell className="font-medium text-base">{task.title}</TableCell>
-                        <TableCell className="text-muted-foreground text-base">{task.area ?? "-"}</TableCell>
-                        <TableCell className="text-muted-foreground text-base pdf-description">
+                        <TableCell className="text-base font-medium">{task.title}</TableCell>
+                        <TableCell className="text-base text-muted-foreground">{task.area ?? "-"}</TableCell>
+                        <TableCell className="text-base text-muted-foreground pdf-description">
                           {task.description}
                         </TableCell>
-                        <TableCell className="text-right pdf-detail-col no-print">
+                        <TableCell className="no-print text-right pdf-detail-col">
                           <Dialog>
                             <DialogTrigger asChild>
                               <Button variant="ghost" size="icon" className="h-8 w-8">
@@ -394,6 +553,12 @@ export function ReportsView() {
                                   <p className="text-sm font-medium text-muted-foreground">Usuario</p>
                                   <p>{task.userName}</p>
                                 </div>
+                                {task.extra && (
+                                  <div>
+                                    <p className="text-sm font-medium text-muted-foreground">Reclamante</p>
+                                    <p>{task.extra}</p>
+                                  </div>
+                                )}
                                 <div>
                                   <p className="text-sm font-medium text-muted-foreground">Area</p>
                                   <p>{task.area ?? "-"}</p>
